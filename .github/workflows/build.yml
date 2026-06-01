@@ -1,0 +1,317 @@
+name: Build FS2GDL90
+
+on:
+  push:
+    branches: [main, master, develop]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main, master, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  BUILD_TYPE: Release
+  CMAKE_BUILD_PARALLEL_LEVEL: 4
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format
+
+      - name: Check formatting
+        run: find src include tests -name '*.cpp' -o -name '*.h' | xargs clang-format --dry-run --Werror
+
+  build-windows:
+    name: Build Windows
+    needs: format
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure X-Plane Frontend
+        run: cmake -S "${{ github.workspace }}" -B "${{ github.workspace }}/build" -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+
+      - name: Build X-Plane Frontend
+        run: cmake --build "${{ github.workspace }}/build" --config ${{ env.BUILD_TYPE }} --target fs2gdl90_xplane
+
+      - name: Configure MSFS Frontend
+        run: >
+          cmake
+          -S "${{ github.workspace }}"
+          -B "${{ github.workspace }}/build-msfs"
+          -DFS2GDL90_BUILD_XPLANE=OFF
+          -DFS2GDL90_BUILD_MSFS=ON
+          "-DMSFS_SDK_PATH=${{ github.workspace }}/MSFS SDK"
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+
+      - name: Build MSFS Frontend
+        run: cmake --build "${{ github.workspace }}/build-msfs" --config ${{ env.BUILD_TYPE }} --target fs2gdl90_msfs
+
+      - name: Verify MSFS Frontend
+        run: |
+          $candidatePaths = @(
+            "build-msfs/fs2gdl90-msfs.exe",
+            "build-msfs/${{ env.BUILD_TYPE }}/fs2gdl90-msfs.exe"
+          )
+          $exe = $candidatePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $exe) {
+            Write-Error "Build failed: fs2gdl90-msfs.exe not found (checked: $($candidatePaths -join ', '))"
+            exit 1
+          }
+          Write-Host "MSFS frontend build successful: $exe"
+          Get-Item $exe | Format-List
+          $exeDir = Split-Path -Parent $exe
+          $simConnectDll = Join-Path $exeDir "SimConnect.dll"
+          if (-not (Test-Path $simConnectDll)) {
+            Write-Error "Build failed: SimConnect.dll was not copied next to fs2gdl90-msfs.exe"
+            exit 1
+          }
+          Write-Host "SimConnect runtime bundled: $simConnectDll"
+          Get-Item $simConnectDll | Format-List
+        shell: pwsh
+
+      - name: Verify X-Plane Frontend
+        run: |
+          $candidatePaths = @(
+            "build/win.xpl",
+            "build/${{ env.BUILD_TYPE }}/win.xpl"
+          )
+          $plugin = $candidatePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $plugin) {
+            Write-Error "Build failed: win.xpl not found (checked: $($candidatePaths -join ', '))"
+            exit 1
+          }
+          Write-Host "X-Plane frontend build successful: $plugin"
+          Get-Item $plugin | Format-List
+        shell: pwsh
+
+      - name: Package X-Plane Frontend
+        run: |
+          mkdir -p package-xplane/xplane/fs2gdl90/64
+          if [ -f "build/win.xpl" ]; then
+            cp build/win.xpl package-xplane/xplane/fs2gdl90/64/
+          else
+            cp "build/${{ env.BUILD_TYPE }}/win.xpl" package-xplane/xplane/fs2gdl90/64/
+          fi
+          cp README.md package-xplane/xplane/fs2gdl90/
+          cp LICENSE package-xplane/xplane/fs2gdl90/
+        shell: bash
+
+      - name: Package MSFS Frontend
+        run: |
+          mkdir -p package-msfs/msfs
+          if [ -f "build-msfs/fs2gdl90-msfs.exe" ]; then
+            cp build-msfs/fs2gdl90-msfs.exe package-msfs/msfs/
+            cp build-msfs/SimConnect.dll package-msfs/msfs/
+          else
+            cp "build-msfs/${{ env.BUILD_TYPE }}/fs2gdl90-msfs.exe" package-msfs/msfs/
+            cp "build-msfs/${{ env.BUILD_TYPE }}/SimConnect.dll" package-msfs/msfs/
+          fi
+          cp README.md package-msfs/
+          cp LICENSE package-msfs/
+        shell: bash
+
+      - name: Upload X-Plane Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: fs2gdl90-windows-xplane
+          path: package-xplane/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload MSFS Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: fs2gdl90-windows-msfs
+          path: package-msfs/
+          if-no-files-found: error
+          retention-days: 14
+
+  build-macos:
+    name: Build macOS
+    needs: format
+    runs-on: macos-15-intel
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Configure X-Plane Frontend
+        run: cmake -S "${{ github.workspace }}" -B "${{ github.workspace }}/build" -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+
+      - name: Build X-Plane Frontend
+        run: cmake --build "${{ github.workspace }}/build" --config ${{ env.BUILD_TYPE }} --target fs2gdl90_xplane
+
+      - name: Verify Build
+        run: |
+          test -f build/mac.xpl
+          ls -lh build/mac.xpl
+          file build/mac.xpl
+          lipo -info build/mac.xpl
+
+      - name: Package
+        run: |
+          mkdir -p package/xplane/fs2gdl90
+          cp build/mac.xpl package/xplane/fs2gdl90/
+          cp README.md package/xplane/fs2gdl90/
+          cp LICENSE package/xplane/fs2gdl90/
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: fs2gdl90-macos
+          path: package/
+          if-no-files-found: error
+          retention-days: 14
+
+  build-linux:
+    name: Build Linux
+    needs: format
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libgl1-mesa-dev
+
+      - name: Configure X-Plane Frontend
+        run: cmake -S "${{ github.workspace }}" -B "${{ github.workspace }}/build" -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+
+      - name: Build X-Plane Frontend
+        run: cmake --build "${{ github.workspace }}/build" --config ${{ env.BUILD_TYPE }} --target fs2gdl90_xplane
+
+      - name: Verify Build
+        run: |
+          test -f build/lin.xpl
+          ls -lh build/lin.xpl
+          file build/lin.xpl
+
+      - name: Package
+        run: |
+          mkdir -p package/xplane/fs2gdl90/64
+          cp build/lin.xpl package/xplane/fs2gdl90/64/
+          cp README.md package/xplane/fs2gdl90/
+          cp LICENSE package/xplane/fs2gdl90/
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: fs2gdl90-linux
+          path: package/
+          if-no-files-found: error
+          retention-days: 14
+
+  create-release:
+    name: Create Release
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Windows X-Plane Artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: fs2gdl90-windows-xplane
+          path: windows-xplane/
+
+      - name: Download Windows MSFS Artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: fs2gdl90-windows-msfs
+          path: windows-msfs/
+
+      - name: Download macOS Artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: fs2gdl90-macos
+          path: macos/
+
+      - name: Download Linux Artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: fs2gdl90-linux
+          path: linux/
+
+      - name: Create Combined Package
+        run: |
+          mkdir -p fs2gdl90/xplane/fs2gdl90/64
+          mkdir -p fs2gdl90/msfs
+          cp macos/xplane/fs2gdl90/mac.xpl fs2gdl90/xplane/fs2gdl90/
+          cp windows-xplane/xplane/fs2gdl90/64/win.xpl fs2gdl90/xplane/fs2gdl90/64/
+          cp linux/xplane/fs2gdl90/64/lin.xpl fs2gdl90/xplane/fs2gdl90/64/
+          cp windows-msfs/msfs/fs2gdl90-msfs.exe fs2gdl90/msfs/
+          cp windows-msfs/msfs/SimConnect.dll fs2gdl90/msfs/
+          cp windows-xplane/xplane/fs2gdl90/README.md fs2gdl90/
+          cp windows-xplane/xplane/fs2gdl90/LICENSE fs2gdl90/
+          zip -r fs2gdl90-${{ github.ref_name }}.zip fs2gdl90/
+
+      - name: Generate checksums
+        run: sha256sum fs2gdl90-${{ github.ref_name }}.zip > fs2gdl90-${{ github.ref_name }}.zip.sha256
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            fs2gdl90-${{ github.ref_name }}.zip
+            fs2gdl90-${{ github.ref_name }}.zip.sha256
+          draft: false
+          prerelease: false
+          body: |
+            ## FS2GDL90 ${{ github.ref_name }}
+
+            `fs2gdl90` broadcasts simulator data over UDP in GDL90 format for EFB apps such as ForeFlight, Garmin Pilot, WingX, and FltPlan Go.
+
+            ### Frontends
+
+            - X-Plane 12 plugin for Windows, macOS Universal, and Linux
+            - Microsoft Flight Simulator 2020/2024 SimConnect desktop frontend for Windows
+
+            ### Package Structure
+
+            ```text
+            fs2gdl90/
+            |-- xplane/
+            |   `-- fs2gdl90/
+            |       |-- mac.xpl
+            |       `-- 64/
+            |           |-- win.xpl
+            |           `-- lin.xpl
+            |-- msfs/
+            |   |-- fs2gdl90-msfs.exe
+            |   `-- SimConnect.dll
+            |-- README.md
+            `-- LICENSE
+            ```
+
+            SHA-256 checksum is provided for download verification.
