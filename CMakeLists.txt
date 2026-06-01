@@ -82,6 +82,7 @@ add_library(fs2gdl90_core STATIC
     ${FS2GDL90_CORE_SOURCES}
     ${FS2GDL90_PUBLIC_HEADERS}
 )
+set_target_properties(fs2gdl90_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(fs2gdl90_core PUBLIC "${CMAKE_SOURCE_DIR}/include")
 fs2gdl90_enable_coverage(fs2gdl90_core)
 if(MSVC)
